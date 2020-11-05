@@ -1,0 +1,1 @@
+sshpass -p "sekoseko1985" scp /Users/generalautomatic/Desktop/EP-Raspberry/Python/main.py pi@192.168.0.128:/home/pi/SW/main.py
