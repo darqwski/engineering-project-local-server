@@ -1,31 +1,9 @@
-import RPi.GPIO as GPIO
-from time import sleep
-import serial
 import requests
-import json
+from iot_utils import *
+from app_requests import *
+from constants import *
 
 
-ADDRESS_FURNACE=1
-ADDRESS_FURNACE_DETAILS=2
-#GREEN
-ADDRESS_LIGHTS_BLIND_ON=10
-ADDRESS_LIGHTS_BLIND_OFF=11
-#BLUE
-ADDRESS_LIGHTS_WINDOW_ON=20
-ADDRESS_LIGHTS_WINDOW_OFF=21
-
-#BLUE
-ADDRESS_LIGHTS_1=30
-ADDRESS_LIGHTS_2=31
-ADDRESS_LIGHTS_3=32
-
-#INPUTS
-ADDRESS_TEMPERATURE=0
-ADDRESS_RAIN=1
-
-ADDRESS_ALL_LIGHTS = [
-    ADDRESS_LIGHTS_BLIND_ON, ADDRESS_LIGHTS_BLIND_OFF, ADDRESS_LIGHTS_WINDOW_ON, ADDRESS_LIGHTS_WINDOW_OFF, ADDRESS_LIGHTS_1, ADDRESS_LIGHTS_2, ADDRESS_LIGHTS_3
-]
 inputs = {
     'is_raining': False,
     'temperature': 30.5,
@@ -34,88 +12,131 @@ inputs = {
     'AC': 0,
     'furnace': 'off'
 }
-
-def char_to_int(char):
-    if char == '0' :
-        return 0
-    if char == '1' :
-        return 1
-    if char == '2' :
-        return 2
-    if char == '3' :
-        return 3
-    if char == '4' :
-        return 4
-    if char == '5' :
-        return 5
-    if char == '6' :
-        return 6
-    if char == '7' :
-        return 7
-    if char == '8' :
-        return 8
-    if char == '9' :
-        return 9
-    if char == 'a' :
-        return 10
-    if char == 'b' :
-        return 11
-    if char == 'c' :
-        return 12
-    if char == 'd' :
-        return 13
-    if char == 'e' :
-        return 14
-    if char == 'f' :
-        return 15
+app_state = {
+    'counter': 0,
+    'furnace_turn_on': None,
+    'furnace_going': False,
+    'blinds_address': 10,
+    'blinds_timer': None,
+    'blinds_working': False,
+    'blinds_state': None,
+    'window_address': 20,
+    'window_timer': None,
+    'window_working': False,
+    'window_state': None,
+    'ac_address': 30,
+    'ac_state': None
+}
 
 
-def hex_to_int(char1, char2, char3, char4):
-    return char_to_int(char1)*16*16*16+char_to_int(char2)*16*16+char_to_int(char3)*16+char_to_int(char4)
+server_data = {}
 
 
-def switch_off_light(address):
-    send_bytes([10, 6, 0, address, 0, 0], 4)
+login_data = {'login':'root','password':'root'}
+host="http://192.168.0.31"
+#host="https://dariuszcabala.pl/engineering";
+
+
+def get_data_from_server():
+    session = requests.Session()
+    session.post(host+'/API/login/',data = login_data)
+    get_request = session.get(host+"/API/program/")
+    server_data = get_request.text
+    print(server_data)
+
+
+def update_building_status():
+    session = requests.Session()
+    session.post(host+'/API/login/',data = login_data)
+    data={'inputs':json.dumps(inputs)}
+    session.post(host+"/API/status/",data=data)
+
+
+def smart_program():
+    print 'Na zewnatrz jest '
+    print inputs['temperature']
+
+    if inputs['temperature']<150:
+        set_ac(0)
+        if app_state['furnace_turn_on'] is None:
+            furnace_going()
+            app_state['furnace_turn_on']=app_state['counter']
+        elif app_state['counter']-app_state['furnace_turn_on'] > 2 and app_state['furnace_going']==False:
+            app_state['furnace_going']=True
+            furnace_on()
+        print 'Jest zimno, wlacz piec'
+    else:
+        app_state['furnace_going']=False
+        app_state['furnace_turn_on']=None
+        furnace_off()
+
+    if 150 <= inputs['temperature'] < 200:
+        set_ac(0)
+        close_device('blinds')
+        if not inputs['is_raining']:
+            open_device('window')
+        else:
+            close_device('window')
+        print 'Jest spoko, jak nie pada otworz okno'
+    elif 200 <= inputs['temperature'] < 300:
+        set_ac(0)
+        if not inputs['is_raining']:
+            open_device('blinds')
+        else:
+            close_device('blinds')
+        print 'Jest cieplo, jak swieci to odslon rolety'
+    elif inputs['temperature']>=300:
+        close_device('blinds')
+        close_device('window')
+        set_ac(1)
+
     return True
 
 
-def switch_blink_light(address):
-    send_bytes([10, 6, 0, address, 0, 255], 4)
-    return True
+def app_timers():
+    print app_state
+    app_state['counter']=app_state['counter']+1
 
 
-def switch_on_light(address):
-    send_bytes([10, 6, 0, address, 255, 255], 4)
-    return True
+def close_device(name):
+    if app_state[name + '_state'] is True or app_state[name+'_state'] is None:
+        app_state[name+'_timer']=app_state['counter']
+        app_state[name+'_state']=False
+        set_module_closing(app_state[name+'_address'])
+    if not app_state[name + '_state']:
+        if app_state[name+'_timer'] is not None:
+            if app_state['counter']-app_state[name + '_timer'] == 1:
+                app_state[name+'_timer']=None
+                set_module_closed(app_state[name+'_address'])
 
 
+def open_device(name):
+    print 'open device'
+    if app_state[name + '_state'] is False or app_state[name+'_state'] is None:
+        app_state[name+'_timer']=app_state['counter']
+        app_state[name+'_state']=True
+        print 'start opening'
+        set_module_opening(app_state[name+'_address'])
+    if app_state[name + '_state']:
+        if app_state[name+'_timer'] is not None:
+            if app_state['counter']-app_state[name + '_timer'] == 1:
+                print 'device opened'
+                app_state[name+'_timer']=None
+                set_module_opened(app_state[name+'_address'])
 
 
-def set_furnace(value1, value2):
-    resp = send_bytes([10, 16, 0, 1, 0, 2, 4,  0, value1, 0, value2], 4)
-    print resp
-    sleep(1)
-    #resp = send_bytes([10, 6, 0, 2, 0, value2], 6)
-    #print resp
-    #sleep(1)
-    return True
-def furnace_off():
-    set_furnace(0,0)
-def furnace_on():
-    set_furnace(1,0)
-def furnace_going():
-    set_furnace(2,0)
-#amount = 1,2,5
-def furnace_add(amount = 1):
-    set_furnace(3,amount)
+def set_ac(value):
+    if app_state['ac_state'] is not value:
+        app_state['ac_state']=value
+        for i in range(value):
+            print 'switching on ', i
+            switch_on_light(app_state['ac_address']+i)
+            sleep(1)
+        for i in range(3-value):
+            print 'switching off ', 2-i
+            switch_off_light(app_state['ac_address'] + 2 - i)
+            sleep(1)
 
-def get_input_register(address):
-    send_bytes([10, 4, 0, address, 255, 255], 4)
-    return True
-
-
-def get_input_registers():
-    return send_bytes([10, 4, 0, 0, 0, 2], 8)
 
 def gather_inputs():
     data=get_input_registers()
@@ -123,55 +144,12 @@ def gather_inputs():
     rain = [data[5],data[6]]
 
     inputs['temperature']=hex_to_int(temperature[0][0],temperature[0][1],temperature[1][0],temperature[1][1])
-    inputs['temperature']=((inputs['temperature']*300/4096))
-    #TEMPERATURE FROM 0 TO 30
+    inputs['temperature']=((inputs['temperature']*400/4096))
+    #TEMPERATURE FROM 0 TO 40
     if rain[0]=='ff' and rain[1]=='ff':
         inputs['is_raining']=True
     else:
         inputs['is_raining']=False
-
-def read_double_bytes(byte_a_1, byte_a_2,byte_b_1, byte_b_2):
-    open_status=0
-    close_status=0
-    if byte_a_1=='ff' and byte_a_2=='ff':
-        open_status='on'
-    if byte_a_1=='ff' and byte_a_2!='ff':
-        open_status='working'
-    if byte_a_1!='ff' and byte_a_2!='ff':
-        open_status='off'
-    if byte_b_1=='ff' and byte_b_2=='ff':
-        close_status='on'
-    if byte_b_1=='ff' and byte_b_2!='ff':
-        close_status='working'
-    if byte_b_1!='ff' and byte_b_2!='ff':
-        close_status='off'
-
-    if close_status=='off' and open_status=='off':
-        return 'closed'
-    if close_status=='on' and open_status=='on':
-        return 'opened'
-    if close_status=='on' and open_status=='working':
-        return 'opening'
-    if close_status=='working' and open_status=='on':
-        return 'closing'
-
-    return 'error'
-
-
-def read_furnace(byte_a_1, byte_a_2,byte_b_1, byte_b_2):
-    print [byte_a_1, byte_a_2,byte_b_1, byte_b_2]
-    if byte_a_2=='01':
-        return 'on'
-    if byte_a_2=='02':
-        return 'running'
-    if byte_a_2=='03' and byte_b_2 == '01':
-        return 'added 1kg'
-    if byte_a_2=='03' and byte_b_2 == '02':
-        return 'added 2kg'
-    if byte_a_2=='03' and byte_b_2 == '05':
-        return 'added 5kg'
-
-    return 'error'
 
 
 def get_devices():
@@ -189,101 +167,21 @@ def get_devices():
     inputs['blinds']= read_double_bytes(blinds[3],blinds[4], blinds[5],blinds[6])
     inputs['furnace']= read_furnace(furnace[3],furnace[4], furnace[5],furnace[6])
 
-
-def send_bytes(to_send, to_receive = 0):
-    print("SENDING....")
-    try:
-        serialPort = serial.Serial(
-            port = "/dev/ttyACM0",
-            timeout = 2,
-            parity = serial.PARITY_NONE,
-            baudrate = 9600,
-            bytesize=serial.EIGHTBITS,
-            stopbits=serial.STOPBITS_ONE
-        )
-        serialPort.write(to_send)
-        sleep(1)
-        response = []
-        while True:
-            c = serialPort.read()
-            if len(c) == 0:
-                break
-
-            response.append(c.encode('hex'))
-        print response
-        serialPort.close()
-    except IOError:
-        print ("Failed at", "", "\n")
-
-    return response
-
-
-server_data = {}
-
-login_data = {'login':'root','password':'root'}
-host="http://192.168.0.31";
-#host="https://dariuszcabala.pl/engineering";
-def get_data_from_server():
-    session = requests.Session()
-    session.post(host+'/API/login/',data = login_data)
-    get_request = session.get(host+"/API/program/")
-    server_data = get_request.text
-    print(server_data)
-def update_building_status():
-    session = requests.Session()
-    session.post(host+'/API/login/',data = login_data)
-    data={'inputs':json.dumps(inputs)}
-    response = session.post(host+"/API/status/",data=data)
-    print response.text
-
-
+print 'Reseting all devices'
 for address in ADDRESS_ALL_LIGHTS:
-    #switch_on_light(address)
-    print("SWITCHING ON", address)
-    #sleep(1)
-#furnace_on()
-while(True):
-   # furnace=send_bytes([10, 3, 0, 1, 0, 2], 8)
-   # print 'furnace, ', furnace
-   # furnace=send_bytes([10, 3, 0, 1, 0, 2], 8)
-    furnace=send_bytes([10, 3, 0, 1, 0, 2], 8)
-    print 'furnace, ', furnace
-    furnace=send_bytes([10, 3, 0, 1, 0, 2], 8)
-    print 'furnace, ', furnace
-    furnace_off()
-    sleep(2)
-    continue
-    # furnace_on()
-    # sleep(2)
-    # get_devices()
-    # print inputs
-    #continue
+    switch_off_light(address)
+furnace_off()
 
+
+while True:
+    print 'GATHERING INPUTS'
     gather_inputs()
+    print 'GATHERING DEVICES'
     get_devices()
+    print 'UPDATING BUILDING STATUS'
     update_building_status()
-    print json.dumps(inputs)
+    smart_program()
     sleep(1)
-    continue
-    #BLINK LIST
-    for address in ADDRESS_ALL_LIGHTS:
-        switch_off_light(address)
-        print("SWITCHING OFF", address)
-        sleep(1)
-    for address in ADDRESS_ALL_LIGHTS:
-        switch_on_light(address)
-        print("SWITCHING ON", address)
-        sleep(1)
-    continue
-    switch_blink_light(ADDRESS_LIGHTS_WINDOW_OFF)
-    sleep(1)
-    switch_off_light(ADDRESS_LIGHTS_WINDOW_ON)
-    sleep(2)
-    switch_blink_light(ADDRESS_LIGHTS_WINDOW_ON)
-    sleep(1)
-    switch_off_light(ADDRESS_LIGHTS_WINDOW_OFF)
-    sleep(2)
-    switch_on_light(ADDRESS_LIGHTS_WINDOW_ON)
-    sleep(1)
-    switch_on_light(ADDRESS_LIGHTS_WINDOW_OFF)
-    sleep(1)
+    app_timers()
+    print 'CURRENT BUILDING STATUS'
+    print inputs, app_state
